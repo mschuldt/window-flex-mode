@@ -23,12 +23,14 @@
 
 ;;; Commentary:
 
-;; window-flex-mode grows the horizontal width of the current window to
-;; accommodate the width of the line at point.
-;; 
+;; window-flex-mode grows the horizontal width of the selected window to
+;; accommodate the width of the longest visable line.
+;;
 ;; This is intended to make it easy to work with many vertically
 ;; split windows when the average window width is less then the
 ;; possible length of text lines.
+;;
+;; The width of the selected window is only expanded, ever reduced.
 ;;
 ;; By default it will try to prevent large differences in window width
 ;; by balancing all windows before attempting to increase the width.
@@ -40,8 +42,14 @@
   :version "0.1"
   :group 'tools)
 
-(defcustom window-flex-min-width 80
+(defcustom window-flex-min-width 40
   "Minimum allowed window width."
+  :group 'window-flex
+  :type 'integer)
+
+(defcustom window-flex-max-width 150
+  "Minimum allowed window width for window extensions.
+A nil value means unlimited"
   :group 'window-flex
   :type 'integer)
 
@@ -50,8 +58,23 @@
   :group 'window-flex
   :type 'boolean)
 
-(defun window-flex--calc-delta ()
-  "Calculate the delta by which to grow the current window."
+(defvar window-flex--selected-window nil)
+(defvar window-flex--window-start nil)
+(defvar window-flex--window-end nil)
+(defvar window-flex--min-window-width nil)
+(make-variable-buffer-local 'window-flex--window-start)
+(make-variable-buffer-local 'window-flex--window-end)
+(make-variable-buffer-local 'window-flex--min-window-width)
+
+(defun window-flex--fit-window-to-buffer ()
+  (let ((fit-window-to-buffer-horizontally 'only)
+        (fit-frame-to-buffer nil))
+    (fit-window-to-buffer (selected-window) nil nil
+                          window-flex-max-width
+                          (min window-flex--min-window-width window-flex-max-width))))
+
+(defun window-flex--fit-current-line ()
+  "Horizontally enlarge window to fit current line"
   (let ((len (save-excursion (end-of-line)
                              (current-column)))
         (width (window-width)))
@@ -59,21 +82,74 @@
                (< width
                   window-flex-min-width))
       (setq len window-flex-min-width))
-    (if (> len width)
-        (- len width)
-      0)))
+    (when window-flex-max-width
+      (setq len (min len window-flex-max-width)))
+    (when (> len width)
+      ;;TODO: window-resizable
+      (enlarge-window (- len width) t))))
+
+(defun window-flex--save-position ()
+  (setq window-flex--selected-window (selected-window))
+  (unless (markerp window-flex--window-start)
+    (setq window-flex--window-start (make-marker)))
+  (unless (markerp window-flex--window-end)
+    (setq window-flex--window-end (make-marker)))
+  (set-marker window-flex--window-start (window-start (selected-window)))
+  (set-marker window-flex--window-end (window-end (selected-window))))
+
+;;TODO: problems when switching in dired buffers - does not enlarge window enough
+;;  when entering subdirs the window shrinks sometimes
+
+(defun window-flex--maybe-fit-window ()
+  "Horizontally extend the selected window if needed to fit the buffer."
+  (let ((start (window-start (selected-window)))
+        (end (window-end (selected-window))))
+    (unless (eq window-flex--selected-window (selected-window))
+      (setq window-flex--min-window-width (max window-flex-min-width
+                                               (window-total-width)))) ;;don't allow shrinking the window
+    (if (and (eq window-flex--selected-window (selected-window))
+             (markerp window-flex--window-start) ;;TODO: make default value a marker
+             (eq (marker-position window-flex--window-start) start)
+             (markerp window-flex--window-end)
+             (eq (marker-position window-flex--window-end) end))
+        ;; The window and visable region has not changed.
+        ;; Check if the current line has grown to long.
+        (window-flex--fit-current-line)
+      (window-flex--fit-window-to-buffer)
+      (window-flex--save-position))))
+
+(progn (setq window-flex--count 0)
+       (setq window-flex--total-time (time-subtract (current-time) (current-time))))
+;; (float-time window-flex--total-time)
+;; (/ (float-time window-flex--total-time) window-flex--count)
+
+(defun window-flex--balance-other-windows (window)
+  ;;TODO: fix case when multiplw windows are displaying the same buffer
+  ;;  -- locking a window should not lock all the windows visiting that buffer
+  (with-current-buffer (window-buffer window) ;; ok to use (current-buffer)?
+    (let ((_window-size-fixed window-size-fixed))
+      (setq window-size-fixed t)
+      (unwind-protect
+          (balance-windows-area)
+        (setq window-size-fixed _window-size-fixed)))))
 
 (defun window-flex-update()
-  "Grow the size of the current window if needed.
+  "Grow the size of the selected window if needed.
 Balance windows before resize if `window-flex-balance-windows' is set"
   (interactive)
-  (let ((delta (window-flex--calc-delta)))
+  (let ((t0 (current-time))
+        (w (window-width))
+        delta)
+    (window-flex--maybe-fit-window)
     (when (and window-flex-balance-windows
-               (> delta 0))
-      (balance-windows)
-      (setq delta (window-flex--calc-delta)))
-    (when (> delta 0)
-      (enlarge-window delta t))))
+               (> (window-width) w))
+      (window-flex--balance-other-windows (selected-window)))
+    (setq window-flex--min-window-width (max window-flex-min-width
+                                             (window-total-width)))
+    (setq window-flex--total-time (time-add window-flex--total-time
+                                            (time-subtract (current-time)
+                                                           t0))
+          window-flex--count (1+ window-flex--count))))
 
 ;;;###autoload
 (define-minor-mode window-flex-mode
@@ -82,5 +158,7 @@ Balance windows before resize if `window-flex-balance-windows' is set"
     (add-hook 'post-command-hook 'window-flex-update)))
 
 (provide 'window-flex-mode)
+
+;; TODO: don't immediately resize windows if they are manually adjusted
 
 ;;; window-flex-mode.el ends here
